@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { DeviceKind, DiffLine, LanguageDraft, ScriptStatus, Segment } from '~/types'
+import type { DeviceKind, DiffLine, LanguageDraft, MismatchType, RecordingStatus, ScriptStatus, Segment } from '~/types'
 import { LANGUAGES, useScriptStore } from '~/stores/script'
 
 const store = useScriptStore()
@@ -26,6 +26,22 @@ const deviceOptions: Array<{ value: DeviceKind; label: string }> = [
   { value: 'kiosk', label: '馆内触摸屏' }
 ]
 
+const recordingStatusMeta: Record<RecordingStatus, { label: string; color: string }> = {
+  pending: { label: '未录制', color: 'grey' },
+  ok: { label: '已录制', color: 'success' },
+  rerecord: { label: '需重录', color: 'error' },
+  decision: { label: '待制作组决定', color: 'warning' }
+}
+const mismatchMeta: Record<MismatchType, { label: string; color: string; icon: string }> = {
+  added: { label: '新增段落', color: 'success', icon: 'mdi-plus-circle-outline' },
+  removed: { label: '删除段落', color: 'error', icon: 'mdi-minus-circle-outline' },
+  'label-changed': { label: '段落标题变化', color: 'warning', icon: 'mdi-pencil-outline' },
+  'narration-changed': { label: '讲解词变化', color: 'warning', icon: 'mdi-microphone-outline' },
+  'accessibility-changed': { label: '无障碍描述变化', color: 'warning', icon: 'mdi-ear-hearing' },
+  'sources-changed': { label: '资料来源变化', color: 'warning', icon: 'mdi-book-open-outline' },
+  'not-submitted': { label: '尚未送审', color: 'grey', icon: 'mdi-cloud-upload-outline' }
+}
+
 const draft = computed(() => store.selectedDraft)
 const exhibit = computed(() => store.selectedExhibit)
 const currentLanguage = computed(() => LANGUAGES.find(item => item.id === store.selectedLanguageId))
@@ -39,6 +55,27 @@ const diffLines = computed<DiffLine[]>(() => {
   const after = selectedVersionB.value?.draft.narration || ''
   return buildDiff(before, after)
 })
+
+// 导览制作侧
+const isSubmitting = computed(() => store.submissions.some(item => item.status === 'pending'))
+const retryableSubmissions = computed(() => store.selectedSubmissions.filter(item => item.status !== 'succeeded'))
+const guideEntries = computed(() => {
+  const release = store.selectedGuideRelease
+  if (!release) return []
+  return release.entries.map(entry => ({ entry, state: store.entryState(entry) }))
+})
+const recordedCount = computed(() => guideEntries.value.filter(item => item.state.status === 'ok').length)
+const rerecordCount = computed(() => guideEntries.value.filter(item => item.state.status === 'rerecord').length)
+const decisionCount = computed(() => guideEntries.value.filter(item => item.state.status === 'decision').length)
+const pendingSubmissionCount = computed(() => store.pendingSubmissions.length)
+
+// 对账
+const reconcileRows = computed(() => store.reconciliationRows)
+const totalMismatches = computed(() => reconcileRows.value.reduce((sum, row) => sum + row.mismatches.length, 0))
+
+function languageLabel(id: string) {
+  return LANGUAGES.find(item => item.id === id)?.label || id
+}
 
 onMounted(() => {
   store.hydrate()
@@ -122,6 +159,7 @@ function segmentLabel(segment: Segment) { return segment.label || '未命名段�
         <span class="status-dot" :style="{ background: 'currentColor' }" />{{ currentStatus.label }}
       </v-chip>
       <v-btn variant="text" prepend-icon="mdi-keyboard-outline" class="d-none d-md-flex" @click="helpDialog = true">快捷键</v-btn>
+      <v-btn color="primary" variant="tonal" prepend-icon="mdi-cloud-upload-outline" :loading="isSubmitting" @click="store.submitForReview">送审</v-btn>
       <v-btn color="primary" prepend-icon="mdi-content-save-outline" @click="versionDialog = true">保存版本</v-btn>
     </v-app-bar>
 
@@ -195,6 +233,14 @@ function segmentLabel(segment: Segment) { return segment.label || '未命名段�
 
         <v-tabs v-model="activeTab" color="primary" bg-color="surface" rounded="lg" class="mb-4 px-2">
           <v-tab value="editor">脚本编辑</v-tab>
+          <v-tab value="guide">
+            <span>导览制作</span>
+            <v-badge v-if="pendingSubmissionCount" :content="pendingSubmissionCount" color="error" inline class="ms-2" />
+          </v-tab>
+          <v-tab value="reconcile">
+            <span>对账</span>
+            <v-badge v-if="totalMismatches" :content="totalMismatches" color="warning" inline class="ms-2" />
+          </v-tab>
           <v-tab value="versions">版本比较</v-tab>
           <v-tab value="preview">设备预览</v-tab>
           <v-tab value="sources">资料核对</v-tab>
@@ -296,6 +342,109 @@ function segmentLabel(segment: Segment) { return segment.label || '未命名段�
                   </v-card>
                 </v-col>
               </v-row>
+            </v-window-item>
+
+            <v-window-item value="guide">
+              <v-card class="script-card pa-4 pa-md-6">
+                <div class="d-flex flex-wrap align-center justify-space-between ga-3 mb-5">
+                  <div>
+                    <div class="section-title">导览制作组</div>
+                    <div class="text-h6 font-weight-bold mt-1">录制清单 · {{ currentLanguage?.label }}</div>
+                  </div>
+                  <v-btn color="primary" prepend-icon="mdi-cloud-upload-outline" :loading="isSubmitting" @click="store.submitForReview">送审当前文稿</v-btn>
+                </div>
+
+                <v-alert v-if="!store.selectedGuideRelease" type="info" variant="tonal" class="mb-4">
+                  尚未送审。编辑侧完成后点击「送审当前文稿」，导览制作组将按送审版本建立录制清单。
+                </v-alert>
+
+                <template v-else>
+                  <div class="d-flex flex-wrap ga-2 mb-4">
+                    <v-chip variant="tonal" prepend-icon="mdi-clock-outline">上次送审：{{ formatTime(store.selectedGuideRelease.submittedAt) }}</v-chip>
+                    <v-chip variant="tonal">共 {{ guideEntries.length }} 条</v-chip>
+                    <v-chip color="success" variant="tonal">已录制 {{ recordedCount }}</v-chip>
+                    <v-chip v-if="rerecordCount" color="error" variant="tonal">需重录 {{ rerecordCount }}</v-chip>
+                    <v-chip v-if="decisionCount" color="warning" variant="tonal">待决定 {{ decisionCount }}</v-chip>
+                  </div>
+
+                  <v-alert
+                    v-for="sub in retryableSubmissions"
+                    :key="sub.id"
+                    type="error"
+                    variant="tonal"
+                    class="mb-3"
+                  >
+                    <div class="d-flex align-center justify-space-between ga-3 flex-wrap">
+                      <span>送审{{ sub.status === 'pending' ? '中' : '失败' }}（{{ formatTime(sub.createdAt) }}）：{{ sub.failReason || '正在送达导览制作组…' }}。已留本地，导览清单未变动。</span>
+                      <v-btn size="small" color="primary" :loading="sub.status === 'pending'" @click="store.retrySubmission(sub.id)">重试</v-btn>
+                    </div>
+                  </v-alert>
+
+                  <div class="d-flex flex-column ga-3">
+                    <div v-for="{ entry, state } in guideEntries" :key="entry.id" class="segment-row" :class="{ locked: state.status === 'ok' }">
+                      <div class="d-flex align-center ga-2 flex-wrap">
+                        <v-chip :color="recordingStatusMeta[state.status].color" size="small" variant="tonal">{{ recordingStatusMeta[state.status].label }}</v-chip>
+                        <span class="font-weight-medium">{{ entry.label || '未命名段落' }}</span>
+                        <v-spacer />
+                        <v-btn v-if="!entry.recorded" size="small" variant="outlined" prepend-icon="mdi-microphone" @click="store.markRecorded(entry.id)">标记已录制</v-btn>
+                        <v-btn v-else size="small" variant="text" @click="store.unmarkRecorded(entry.id)">取消录制</v-btn>
+                      </div>
+                      <p class="text-body-2 mt-2 mb-0" style="white-space:pre-wrap">{{ entry.narration }}</p>
+                      <div class="d-flex flex-wrap ga-2 mt-2">
+                        <v-chip v-if="state.narrationChanged" color="warning" size="x-small" variant="tonal">讲解词已变</v-chip>
+                        <v-chip v-if="state.accessibilityChanged" color="warning" size="x-small" variant="tonal">无障碍描述已变</v-chip>
+                        <v-chip v-if="state.sourcesChanged" color="warning" size="x-small" variant="tonal">资料来源已变</v-chip>
+                      </div>
+                      <div v-if="state.status === 'decision'" class="d-flex ga-2 mt-3 flex-wrap">
+                        <v-btn size="small" color="success" variant="tonal" @click="store.keepRecording(entry.id)">讲解词没变，不重录</v-btn>
+                        <v-btn size="small" color="warning" variant="tonal" @click="store.decideRerecord(entry.id)">需要重录</v-btn>
+                      </div>
+                      <div v-if="state.status === 'rerecord'" class="d-flex ga-2 mt-3 flex-wrap">
+                        <v-btn size="small" color="primary" variant="tonal" prepend-icon="mdi-check" @click="store.markRerecordDone(entry.id)">重录完成，更新快照</v-btn>
+                      </div>
+                    </div>
+                  </div>
+                </template>
+              </v-card>
+            </v-window-item>
+
+            <v-window-item value="reconcile">
+              <v-card class="script-card pa-4 pa-md-6">
+                <div class="section-title mb-1">两边对账</div>
+                <div class="text-h6 font-weight-bold mb-4">按展项和语言列出差异，等人确认</div>
+                <v-alert type="info" variant="tonal" class="mb-4">
+                  编辑侧改动只在编辑侧生效；导览录制清单按上次成功送审版本固化。两边对不上的条目列在这里，按展项和语言分组。
+                </v-alert>
+                <v-empty-state
+                  v-if="!totalMismatches"
+                  icon="mdi-check-all"
+                  title="两边一致"
+                  text="编辑侧与导览录制清单没有差异。"
+                />
+                <div v-for="row in reconcileRows" :key="`${row.exhibit.id}-${row.languageId}`" class="mb-4">
+                  <div class="d-flex align-center ga-2 mb-2 flex-wrap">
+                    <v-chip size="small" variant="outlined">{{ row.exhibit.code }}</v-chip>
+                    <span class="font-weight-medium">{{ row.exhibit.title }}</span>
+                    <v-chip size="x-small" variant="tonal">{{ languageLabel(row.languageId) }}</v-chip>
+                    <v-spacer />
+                    <v-chip v-if="row.mismatches.length" color="warning" size="small" variant="tonal">{{ row.mismatches.length }} 项差异</v-chip>
+                    <v-chip v-else color="success" size="small" variant="tonal">一致</v-chip>
+                  </div>
+                  <div v-if="row.mismatches.length" class="d-flex flex-column ga-2">
+                    <div
+                      v-for="(m, index) in row.mismatches"
+                      :key="index"
+                      class="d-flex align-center ga-2 pa-2 rounded-lg flex-wrap"
+                      style="background:#fff;border:1px solid rgba(45,38,32,.08)"
+                    >
+                      <v-icon :color="mismatchMeta[m.type].color" size="small">{{ mismatchMeta[m.type].icon }}</v-icon>
+                      <span class="font-weight-medium">{{ m.label }}</span>
+                      <v-chip :color="mismatchMeta[m.type].color" size="x-small" variant="tonal">{{ mismatchMeta[m.type].label }}</v-chip>
+                      <span v-if="m.detail" class="text-caption text-medium-emphasis">· {{ m.detail }}</span>
+                    </div>
+                  </div>
+                </div>
+              </v-card>
             </v-window-item>
 
             <v-window-item value="versions">
